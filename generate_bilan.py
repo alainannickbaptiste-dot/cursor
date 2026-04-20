@@ -376,6 +376,13 @@ def parse_matera_csv(csv_path):
             # Transferts internes entre sous-comptes (pas un mouvement économique)
             if 'Transfert du fonds travaux' in libelle:
                 continue
+            # Reprises erronées Matera : charges déjà comptabilisées et payées
+            # sur exercices antérieurs (AVIPUR 792€ en 2024, Honoraires haie 120€ en 2023)
+            raw_num = compte_raw.split(' - ')[0].strip()
+            if raw_num == '611001' and 'Dépensé avant' in libelle:
+                continue
+            if raw_num == '614015' and 'Dépensé avant' in libelle:
+                continue
 
             # Pour les comptes de bilan (classes 1-5), ignorer les soldes antérieurs
             # (ce sont des reprises d'ouverture, pas des mouvements)
@@ -762,6 +769,7 @@ actif_data = [
     ]),
     ("Créances fournisseurs & tiers", [
         ("Fournisseurs débiteurs (4010)", [0, 0, 11.74]),
+        ("Correction reprises erronées Matera (*)", [0, 0, 912.00]),
     ]),
     ("Comptes de régularisation - Actif", [
         ("Régularisation charges débiteur (471)", [18665.97, 26363.21, 26362.57]),
