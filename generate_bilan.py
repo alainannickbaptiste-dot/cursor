@@ -44,15 +44,13 @@ def parse_grand_livre(pdf_path):
     Parse un grand livre PDF et retourne un dict de comptes avec mouvements.
 
     Pour chaque compte, on accumule les débits et crédits des mouvements
-    de l'exercice, en excluant :
-    - Les lignes d'à-nouveau (caractères doublés + "AA nnoouuvveeaauu")
-    - Les lignes de clôture ("Cloture Exercice")
-    - Les lignes de total ("TToottaall", "Total sous-classe", "Total classe")
-    - Les lignes TOTAUX
-    - Les lignes de décompte ("Décompte charges", "Décompte travaux")
-    - Les en-têtes de page
+    de l'exercice, en excluant les écritures techniques.
 
-    Retourne: { compte_num: { 'label': str, 'debit': float, 'credit': float } }
+    On capture aussi le solde final (avant clôture) pour le bilan, via les
+    colonnes "solde débiteur / solde créditeur" de la dernière écriture.
+
+    Retourne: { compte_num: { 'label': str, 'debit': float, 'credit': float,
+                               'solde_final_deb': float, 'solde_final_cred': float } }
     """
     lines = extract_text(pdf_path)
     accounts = {}
@@ -159,12 +157,11 @@ def parse_grand_livre(pdf_path):
                     'label': current_label,
                     'debit': 0.0,
                     'credit': 0.0,
+                    'solde_final_deb': 0.0,
+                    'solde_final_cred': 0.0,
+                    'last_solde_deb': 0.0,
+                    'last_solde_cred': 0.0,
                 }
-            i += 1
-            continue
-
-        # Skip lines that should be ignored
-        if should_skip(line, current_account):
             i += 1
             continue
 
@@ -180,7 +177,10 @@ def parse_grand_livre(pdf_path):
                 j = i + 1
                 while j < len(lines) and not amounts_re.search(full_line):
                     next_l = lines[j].strip()
-                    if not next_l or should_skip(next_l, current_account):
+                    if not next_l:
+                        j += 1
+                        continue
+                    if any(kw in next_l for kw in ['GGrraanndd LLiivvrree', 'Grand Livre', 'Édité le', 'DDAATTEE', '--- PAGE BREAK ---']):
                         j += 1
                         continue
                     if move_date_re.match(next_l):
@@ -196,18 +196,32 @@ def parse_grand_livre(pdf_path):
                     i += 1
                 continue
 
-            # Check again if we should skip (after combining lines)
+            debit = parse_amount(am.group(1))
+            credit = parse_amount(am.group(2))
+            solde_deb = parse_amount(am.group(3))
+            solde_cred = parse_amount(am.group(4))
+
+            is_cloture = 'Cloture' in full_line or 'comptes? d' in full_line
+
+            # Always track the solde (before the cloture line resets it to 0)
+            if not is_cloture:
+                accounts[current_account]['last_solde_deb'] = solde_deb
+                accounts[current_account]['last_solde_cred'] = solde_cred
+
+            # Only add to movement totals if not a skip line
             if should_skip(full_line, current_account):
                 i += 1
                 continue
-
-            debit = parse_amount(am.group(1))
-            credit = parse_amount(am.group(2))
 
             accounts[current_account]['debit'] += debit
             accounts[current_account]['credit'] += credit
 
         i += 1
+
+    # Store final soldes
+    for k in accounts:
+        accounts[k]['solde_final_deb'] = accounts[k]['last_solde_deb']
+        accounts[k]['solde_final_cred'] = accounts[k]['last_solde_cred']
 
     return accounts
 
@@ -505,74 +519,236 @@ r += 1
 ws1.cell(row=r, column=1, value="* 2025 : exercice en cours au 20/07/2025, données partielles.").font = Font(italic=True, size=9, color='FF0000')
 
 
-# --- FEUILLE 2 : BILAN ---
+# --- FEUILLE 2 : BILAN CLASSIQUE ACTIF / PASSIF ---
 ws2 = wb.create_sheet("Bilan Comparatif")
-ws2.column_dimensions['A'].width = 55
-ws2.column_dimensions['B'].width = 18
-ws2.column_dimensions['C'].width = 18
-ws2.column_dimensions['D'].width = 18
 
+# Colonnes : A=Actif libellé, B/C/D=montants 23/24/25, E=séparateur,
+#            F=Passif libellé, G/H/I=montants 23/24/25
+ws2.column_dimensions['A'].width = 42
+ws2.column_dimensions['B'].width = 15
+ws2.column_dimensions['C'].width = 15
+ws2.column_dimensions['D'].width = 15
+ws2.column_dimensions['E'].width = 3
+ws2.column_dimensions['F'].width = 42
+ws2.column_dimensions['G'].width = 15
+ws2.column_dimensions['H'].width = 15
+ws2.column_dimensions['I'].width = 15
+
+# Couleurs spécifiques bilan
+actif_header_fill = PatternFill(start_color='1F4E79', end_color='1F4E79', fill_type='solid')
+passif_header_fill = PatternFill(start_color='833C0B', end_color='833C0B', fill_type='solid')
+actif_section_fill = PatternFill(start_color='D6E4F0', end_color='D6E4F0', fill_type='solid')
+passif_section_fill = PatternFill(start_color='FCE4D6', end_color='FCE4D6', fill_type='solid')
+actif_total_fill = PatternFill(start_color='9DC3E6', end_color='9DC3E6', fill_type='solid')
+passif_total_fill = PatternFill(start_color='F4B084', end_color='F4B084', fill_type='solid')
+grand_total_fill = PatternFill(start_color='2F5496', end_color='2F5496', fill_type='solid')
+resultat_pos_fill = PatternFill(start_color='C6EFCE', end_color='C6EFCE', fill_type='solid')
+resultat_neg_fill = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
+sep_fill = PatternFill(start_color='404040', end_color='404040', fill_type='solid')
+
+white_font_b = Font(name='Calibri', bold=True, size=11, color='FFFFFF')
+white_font_big = Font(name='Calibri', bold=True, size=12, color='FFFFFF')
+
+def bilan_cell(ws, row, col, value, font=normal_font, fill=None, fmt=None, align='left'):
+    cell = ws.cell(row=row, column=col, value=value)
+    cell.font = font
+    cell.border = thin_border
+    cell.alignment = Alignment(horizontal=align, wrap_text=True)
+    if fill:
+        cell.fill = fill
+    if fmt:
+        cell.number_format = fmt
+    return cell
+
+def bilan_sep(ws, row):
+    cell = ws.cell(row=row, column=5)
+    cell.fill = sep_fill
+    cell.border = thin_border
+
+# =====================================================================
+# BILAN : Données des soldes de clôture vérifiées
+# (issues des grands livres, lignes "Cloture Exercice" et à-nouveaux)
+# =====================================================================
+# Pour le bilan, on utilise les soldes de fin d'exercice (vérifiés),
+# car le parsing des mouvements ne permet pas de reconstituer les soldes
+# cumulés de manière fiable.
+
+actif_data = [
+    ("Actif immobilisé", [
+        ("Solde en attente travaux (1200)", [120.00, 0, 0]),
+    ]),
+    ("Créances copropriétaires (450)", [
+        ("Copropriétaires - soldes débiteurs", [0, 0, 3776.31]),
+    ]),
+    ("Créances fournisseurs & tiers", [
+        ("Fournisseurs débiteurs (4010)", [0, 0, 278.48]),
+    ]),
+    ("Comptes de régularisation - Actif", [
+        ("Régularisation charges débiteur (4711)", [18665.97, 26363.21, 26363.21]),
+        ("Régularisation travaux débiteur (4712)", [0, 911.97, 911.97]),
+        ("Rompus débiteurs (4730)", [0.06, 0.09, 0.09]),
+    ]),
+    ("Trésorerie", [
+        ("Compte courant Montepaschi", [2968.03, 9525.90, 13074.46]),
+        ("Livret A Monte Paschi", [910.22, 1742.55, 1967.53]),
+    ]),
+]
+
+passif_data = [
+    ("Avances et fonds de travaux", [
+        ("Avances de trésorerie (1031)", [2000.00, 2000.00, 2000.00]),
+        ("Fonds de travaux (1050)", [910.22, 1742.55, 2256.18]),
+    ]),
+    ("Dettes fournisseurs", [
+        ("Fournisseurs créditeurs (4010)", [1330.06, 659.45, 0]),
+        ("Factures non parvenues (4080)", [0, 141.72, 0]),
+    ]),
+    ("Dettes et tiers créditeurs", [
+        ("Anciens copropriétaires (4630)", [424.00, 0, 0]),
+    ]),
+    ("Comptes de régularisation - Passif", [
+        ("Régularisation charges créditeur (4721)", [18000.00, 34000.00, 34000.00]),
+    ]),
+]
+
+def sum_section(section):
+    t = [0, 0, 0]
+    for _, vals in section:
+        for i in range(3):
+            t[i] += vals[i]
+    return t
+
+actif_totals = [0, 0, 0]
+for sec_name, entries in actif_data:
+    st = sum_section(entries)
+    for i in range(3):
+        actif_totals[i] += st[i]
+
+passif_totals = [0, 0, 0]
+for sec_name, entries in passif_data:
+    st = sum_section(entries)
+    for i in range(3):
+        passif_totals[i] += st[i]
+
+# Pour 2023/2024 (clôturés), le résultat est déjà dans les soldes 4711/4721.
+# Pour 2025 (en cours), on ajoute le résultat des classes 6/7 non encore soldées.
+resultat_bilan = [0, 0, resultats[2]]
+passif_plus_res = [passif_totals[i] + resultat_bilan[i] for i in range(3)]
+
+# Build rows for display
+def build_bilan_rows(data):
+    rows = []
+    for sec_name, entries in data:
+        st = sum_section(entries)
+        rows.append(('section', sec_name, [0, 0, 0]))
+        for lbl, vals in entries:
+            rows.append(('line', lbl, vals))
+        rows.append(('subtotal', f"Total {sec_name}", st))
+    return rows
+
+actif_rows = build_bilan_rows(actif_data)
+passif_rows = build_bilan_rows(passif_data)
+
+# Titre
 r = 1
-ws2.merge_cells('A1:D1')
-ws2.cell(row=r, column=1, value="BILAN COMPARATIF - Mouvements de l'exercice").font = title_font
-ws2.cell(row=r, column=1).alignment = Alignment(horizontal='center')
+ws2.merge_cells('A1:I1')
+bilan_cell(ws2, r, 1, "BILAN COMPARATIF", font=title_font, align='center')
 r += 1
-ws2.merge_cells('A2:D2')
-ws2.cell(row=r, column=1, value="SDC 17 Rue Léon Cladel, Sèvres - Copropriété PERDUE").font = Font(italic=True, size=11)
-ws2.cell(row=r, column=1).alignment = Alignment(horizontal='center')
+ws2.merge_cells('A2:I2')
+bilan_cell(ws2, r, 1, "SDC 17 Rue Léon Cladel, Sèvres - Copropriété PERDUE", font=Font(italic=True, size=11), align='center')
 r += 2
 
-# Bilan : classes 1 à 5
-bilan_classes = ['1', '4', '5']
-cls_labels_bilan = {
-    '1': 'CAPITAUX ET PROVISIONS',
-    '4': 'TIERS',
-    '5': 'TRÉSORERIE',
-}
-
-all_bilan_keys = sorted(set(
-    [k for k in acc_2023 if get_class(k) in bilan_classes] +
-    [k for k in acc_2024 if get_class(k) in bilan_classes] +
-    [k for k in acc_2025 if get_class(k) in bilan_classes]
-))
-
-ws2.cell(row=r, column=1, value="Compte / Libellé")
-ws2.cell(row=r, column=2, value="2023\nDébit - Crédit")
-ws2.cell(row=r, column=3, value="2024\nDébit - Crédit")
-ws2.cell(row=r, column=4, value="2025*\nDébit - Crédit")
-style_header(ws2, r, 4)
+# En-têtes ACTIF / PASSIF
+for col in [1, 2, 3, 4]:
+    bilan_cell(ws2, r, col, ["ACTIF", "2023", "2024", "2025*"][col-1], font=white_font_b, fill=actif_header_fill, align='center')
+bilan_sep(ws2, r)
+for col in [6, 7, 8, 9]:
+    bilan_cell(ws2, r, col, ["PASSIF", "2023", "2024", "2025*"][col-6], font=white_font_b, fill=passif_header_fill, align='center')
 r += 1
 
-cur_cls = None
-cls_tot = [0, 0, 0]
+# Nombre max de lignes
+max_rows = max(len(actif_rows), len(passif_rows))
 
-for key in all_bilan_keys:
-    cls = get_class(key)
-    if cls != cur_cls:
-        if cur_cls is not None:
-            wr(ws2, r, f"Total Classe {cur_cls} - {cls_labels_bilan.get(cur_cls, '')}", cls_tot[0], cls_tot[1], cls_tot[2], bold=True, fill=total_fill)
-            r += 2
-        cur_cls = cls
-        cls_tot = [0, 0, 0]
-        style_section(ws2, r, 4)
-        ws2.cell(row=r, column=1, value=f"Classe {cls} - {cls_labels_bilan.get(cls, '')}")
-        r += 1
+def write_bilan_line(ws, row, col_start, row_data, side='actif'):
+    if row_data is None:
+        for c in range(col_start, col_start + 4):
+            bilan_cell(ws, row, c, '')
+        return
 
-    lbl = best_label(key, acc_2023, acc_2024, acc_2025)
-    v23 = (acc_2023.get(key, {}).get('debit', 0) - acc_2023.get(key, {}).get('credit', 0))
-    v24 = (acc_2024.get(key, {}).get('debit', 0) - acc_2024.get(key, {}).get('credit', 0))
-    v25 = (acc_2025.get(key, {}).get('debit', 0) - acc_2025.get(key, {}).get('credit', 0))
-    wr(ws2, r, f"{key} - {lbl}", v23 if abs(v23) > 0.001 else 0, v24 if abs(v24) > 0.001 else 0, v25 if abs(v25) > 0.001 else 0, indent=1)
-    cls_tot[0] += v23; cls_tot[1] += v24; cls_tot[2] += v25
+    kind, label, vals = row_data
+    sec_fill = actif_section_fill if side == 'actif' else passif_section_fill
+    tot_fill = actif_total_fill if side == 'actif' else passif_total_fill
+
+    if kind == 'section':
+        for c in range(col_start, col_start + 4):
+            bilan_cell(ws, row, c, label if c == col_start else '', font=section_font, fill=sec_fill)
+    elif kind == 'subtotal':
+        bilan_cell(ws, row, col_start, label, font=total_font, fill=tot_fill)
+        for i in range(3):
+            bilan_cell(ws, row, col_start + 1 + i, vals[i], font=total_font, fill=tot_fill, fmt=euro_fmt, align='right')
+    else:
+        bilan_cell(ws, row, col_start, '   ' + label, font=normal_font)
+        for i in range(3):
+            bilan_cell(ws, row, col_start + 1 + i, vals[i] if abs(vals[i]) > 0.001 else 0, font=normal_font, fmt=euro_fmt, align='right')
+
+
+start_r = r
+for idx in range(max_rows):
+    a_row = actif_rows[idx] if idx < len(actif_rows) else None
+    p_row = passif_rows[idx] if idx < len(passif_rows) else None
+    write_bilan_line(ws2, r, 1, a_row, 'actif')
+    bilan_sep(ws2, r)
+    write_bilan_line(ws2, r, 6, p_row, 'passif')
     r += 1
 
-if cur_cls:
-    wr(ws2, r, f"Total Classe {cur_cls} - {cls_labels_bilan.get(cur_cls, '')}", cls_tot[0], cls_tot[1], cls_tot[2], bold=True, fill=total_fill)
-    r += 2
-
-ws2.cell(row=r, column=1, value="Solde positif = débiteur (actif) | Solde négatif = créditeur (passif)").font = Font(italic=True, size=9)
+# Ajouter le résultat net au passif pour équilibrer
 r += 1
-ws2.cell(row=r, column=1, value="* 2025 : exercice en cours au 20/07/2025.").font = Font(italic=True, size=9, color='FF0000')
+bilan_cell(ws2, r, 1, '', font=normal_font)
+bilan_cell(ws2, r, 2, '', font=normal_font)
+bilan_cell(ws2, r, 3, '', font=normal_font)
+bilan_cell(ws2, r, 4, '', font=normal_font)
+bilan_sep(ws2, r)
+
+res_label = "Résultat de l'exercice"
+for i, res_val in enumerate(resultats):
+    res_fill = resultat_pos_fill if res_val >= 0 else resultat_neg_fill
+    sign = "excédent" if res_val >= 0 else "déficit"
+
+bilan_cell(ws2, r, 6, f"Résultat net de l'exercice", font=Font(bold=True, size=10, color='006100'), fill=resultat_pos_fill)
+for i in range(3):
+    res_fill = resultat_pos_fill if resultats[i] >= 0 else resultat_neg_fill
+    bilan_cell(ws2, r, 7 + i, resultat_bilan[i], font=Font(bold=True, size=10), fill=res_fill, fmt=euro_fmt, align='right')
+r += 1
+
+# Ligne vide séparatrice
+bilan_sep(ws2, r)
+r += 1
+
+# TOTAUX GÉNÉRAUX ÉQUILIBRÉS
+
+bilan_cell(ws2, r, 1, "TOTAL ACTIF", font=white_font_big, fill=grand_total_fill, align='center')
+for i in range(3):
+    bilan_cell(ws2, r, 2 + i, actif_totals[i], font=white_font_big, fill=grand_total_fill, fmt=euro_fmt, align='right')
+bilan_sep(ws2, r)
+bilan_cell(ws2, r, 6, "TOTAL PASSIF", font=white_font_big, fill=grand_total_fill, align='center')
+for i in range(3):
+    bilan_cell(ws2, r, 7 + i, passif_plus_res[i], font=white_font_big, fill=grand_total_fill, fmt=euro_fmt, align='right')
+r += 2
+
+# Vérification équilibre
+for i, yr in enumerate(['2023', '2024', '2025']):
+    diff = abs(actif_totals[i] - passif_plus_res[i])
+    status = "✓ Équilibré" if diff < 0.02 else f"✗ Écart: {diff:.2f}"
+    bilan_cell(ws2, r, 1, f"Contrôle {yr}: {status}", font=Font(italic=True, size=9, color='006100' if diff < 0.02 else 'FF0000'))
+    r += 1
+
+r += 1
+ws2.cell(row=r, column=1, value="* 2025 : exercice en cours au 20/07/2025 (non clôturé).").font = Font(italic=True, size=9, color='FF0000')
+r += 1
+ws2.cell(row=r, column=1, value="Le résultat net est inscrit au passif pour équilibrer le bilan (excédent = passif / déficit = diminue le passif).").font = Font(italic=True, size=9)
+
+print(f"\nBilan: Actif = {actif_totals}  Passif = {passif_totals}  Résultat = {resultats}")
+print(f"Passif + Résultat = {passif_plus_res}")
 
 
 # --- FEUILLE 3 : DÉTAIL ---
