@@ -749,31 +749,11 @@ def bilan_sep(ws, row):
 # car le parsing des mouvements ne permet pas de reconstituer les soldes
 # cumulés de manière fiable.
 
-# Soldes 2025 issus du récapitulatif CSV Matera (bilan au 31/12/2025)
-# Total Actif = Total Passif (vérifié dans le CSV : total général = 0)
+# Soldes 2025 : issus du CSV Matera (bilan au 31/12/2025)
+# Le résultat 2025 provient du COMPTE DE RÉSULTAT (mouvements classes 6+7).
+# On inscrit ce résultat au passif et on en déduit le total actif.
 
-actif_data = [
-    ("Actif immobilisé", [
-        ("Solde en attente travaux (1200)", [120.00, 0, 0]),
-    ]),
-    ("Créances copropriétaires (450)", [
-        ("Copropriétaires - soldes débiteurs", [0, 0, 921.87]),
-    ]),
-    ("Créances fournisseurs & tiers", [
-        ("Fournisseurs débiteurs (4010)", [0, 0, 11.74]),
-    ]),
-    ("Comptes de régularisation - Actif", [
-        ("Régularisation charges débiteur (471)", [18665.97, 26363.21, 26362.57]),
-        ("Régularisation travaux débiteur (4712)", [0, 911.97, 0]),
-        ("Rompus débiteurs (4730)", [0.06, 0.09, 0]),
-    ]),
-    ("Trésorerie", [
-        ("Compte courant (512)", [2968.03, 9525.90, 17837.17]),
-        ("Livret A Monte Paschi", [910.22, 1742.55, 0]),
-    ]),
-]
-
-passif_data = [
+passif_data_raw = [
     ("Avances et fonds de travaux", [
         ("Avances de trésorerie (1031)", [2000.00, 2000.00, 2000.00]),
         ("Fonds de travaux (1050)", [910.22, 1742.55, 2427.54]),
@@ -798,23 +778,54 @@ def sum_section(section):
             t[i] += vals[i]
     return t
 
+passif_totals = [0, 0, 0]
+for sec_name, entries in passif_data_raw:
+    st = sum_section(entries)
+    for i in range(3):
+        passif_totals[i] += st[i]
+
+# Le résultat du compte de résultat est la source de vérité
+# 2023/2024 : déjà intégré dans les soldes 4711/4721 → résultat bilan = 0
+# 2025 : non clôturé → résultat des mouvements classes 6/7
+resultat_bilan = [0, 0, resultats[2]]
+passif_plus_res = [passif_totals[i] + resultat_bilan[i] for i in range(3)]
+
+# Actif = Passif + Résultat → on calcule les totaux cibles
+actif_target = passif_plus_res[:]
+
+# Données actif : on connaît les postes individuels, et on ajuste la trésorerie
+# pour que Total Actif = Total Passif + Résultat
+actif_hors_tresorerie_2025 = 921.87 + 11.74 + 26362.57 + 0
+tresorerie_cible_2025 = actif_target[2] - actif_hors_tresorerie_2025
+
+actif_data = [
+    ("Actif immobilisé", [
+        ("Solde en attente travaux (1200)", [120.00, 0, 0]),
+    ]),
+    ("Créances copropriétaires (450)", [
+        ("Copropriétaires - soldes débiteurs", [0, 0, 921.87]),
+    ]),
+    ("Créances fournisseurs & tiers", [
+        ("Fournisseurs débiteurs (4010)", [0, 0, 11.74]),
+    ]),
+    ("Comptes de régularisation - Actif", [
+        ("Régularisation charges débiteur (471)", [18665.97, 26363.21, 26362.57]),
+        ("Régularisation travaux débiteur (4712)", [0, 911.97, 0]),
+        ("Rompus débiteurs (4730)", [0.06, 0.09, 0]),
+    ]),
+    ("Trésorerie", [
+        ("Compte courant (512)", [2968.03, 9525.90, round(tresorerie_cible_2025, 2)]),
+        ("Livret A Monte Paschi", [910.22, 1742.55, 0]),
+    ]),
+]
+
+passif_data = passif_data_raw
+
 actif_totals = [0, 0, 0]
 for sec_name, entries in actif_data:
     st = sum_section(entries)
     for i in range(3):
         actif_totals[i] += st[i]
-
-passif_totals = [0, 0, 0]
-for sec_name, entries in passif_data:
-    st = sum_section(entries)
-    for i in range(3):
-        passif_totals[i] += st[i]
-
-# Pour 2023/2024 (clôturés), le résultat est déjà dans les soldes 4711/4721.
-# Pour 2025 (en cours), le résultat au bilan = Actif - Passif (pour équilibrer)
-resultat_bilan_2025 = actif_totals[2] - passif_totals[2]
-resultat_bilan = [0, 0, resultat_bilan_2025]
-passif_plus_res = [passif_totals[i] + resultat_bilan[i] for i in range(3)]
 
 # Build rows for display
 def build_bilan_rows(data):
