@@ -235,12 +235,16 @@ print("Parsing 2023 (MANDA)...")
 acc_2023 = parse_grand_livre(f'{base}/grand_livre-du-2023-01-01-au-2023-12-31.pdf')
 print("Parsing 2024 (MANDA)...")
 acc_2024 = parse_grand_livre(f'{base}/grand_livre-du-2024-01-01-au-2024-12-31.pdf')
-print("Parsing 2025 (MANDA, 01/01 - 20/07)...")
-acc_2025 = parse_grand_livre(f'{base}/grand_livre-du-2025-01-01-au-2025-12-31.pdf')
+print("Parsing 2025 (MANDA, 01/01 - 20/07, pour référence)...")
+acc_2025_manda = parse_grand_livre(f'{base}/grand_livre-du-2025-01-01-au-2025-12-31.pdf')
 
 
 # =====================================================================
-# 3b. PARSER CSV MATERA (nouveau syndic, à partir du 28/07/2025)
+# 3b. PARSER CSV MATERA (nouveau syndic)
+# Le CSV Matera est la SOURCE UNIQUE pour 2025 : il contient l'intégralité
+# de l'exercice, y compris les charges engagées par l'ancien syndic
+# (reprises dans les lignes "Dépensé avant le 28/07/2025").
+# On ne neutralise PAS ces reprises ici puisque le CSV est la seule source.
 # =====================================================================
 
 import csv
@@ -319,10 +323,12 @@ def parse_matera_csv(csv_path):
         '705': ('7050 0001', 'Intérêts livret A'),
     }
 
-    reprise_keywords = [
+    # On ne neutralise que les soldes antérieurs des comptes de bilan (cl. 1-5),
+    # car ils représentent des soldes d'ouverture, pas des mouvements.
+    # Les reprises de charges ("Dépensé avant") sont de vrais mouvements de l'exercice.
+    reprise_keywords_bilan = [
         'Solde antérieur au 28/07/2025',
         'date de reprise par Matera',
-        'Dépensé avant le 28/07/2025',
     ]
 
     accounts = {}
@@ -367,10 +373,15 @@ def parse_matera_csv(csv_path):
                 continue
             if libelle.startswith('Total'):
                 continue
-            if any(kw in libelle for kw in reprise_keywords):
-                continue
-            # Skip lines with "Transfert du fonds travaux" (internal transfers)
+            # Transferts internes entre sous-comptes (pas un mouvement économique)
             if 'Transfert du fonds travaux' in libelle:
+                continue
+
+            # Pour les comptes de bilan (classes 1-5), ignorer les soldes antérieurs
+            # (ce sont des reprises d'ouverture, pas des mouvements)
+            mapped_test, _ = normalize_account(compte_raw)
+            mapped_class = mapped_test[0] if mapped_test else ''
+            if mapped_class in ('1', '4', '5') and any(kw in libelle for kw in reprise_keywords_bilan):
                 continue
 
             debit = parse_csv_amount(debit_raw)
@@ -394,25 +405,14 @@ def parse_matera_csv(csv_path):
     return accounts
 
 
-print("Parsing 2025 Matera (CSV, post 28/07/2025)...")
-acc_2025_matera = parse_matera_csv(f'{base}/2025.csv')
-
-# Fusionner les mouvements Matera dans acc_2025
-print("Fusion MANDA + Matera pour 2025...")
-for k, v in acc_2025_matera.items():
-    if k in acc_2025:
-        acc_2025[k]['debit'] += v['debit']
-        acc_2025[k]['credit'] += v['credit']
-    else:
-        acc_2025[k] = {
-            'label': v['label'],
-            'debit': v['debit'],
-            'credit': v['credit'],
-            'solde_final_deb': 0,
-            'solde_final_cred': 0,
-            'last_solde_deb': 0,
-            'last_solde_cred': 0,
-        }
+print("Parsing 2025 Matera (CSV = source unique pour 2025)...")
+acc_2025 = parse_matera_csv(f'{base}/2025.csv')
+# Ajouter les champs nécessaires pour compatibilité
+for k in acc_2025:
+    acc_2025[k].setdefault('solde_final_deb', 0)
+    acc_2025[k].setdefault('solde_final_cred', 0)
+    acc_2025[k].setdefault('last_solde_deb', 0)
+    acc_2025[k].setdefault('last_solde_cred', 0)
 
 
 # =====================================================================
@@ -749,11 +749,32 @@ def bilan_sep(ws, row):
 # car le parsing des mouvements ne permet pas de reconstituer les soldes
 # cumulés de manière fiable.
 
-# Soldes 2025 : issus du CSV Matera (bilan au 31/12/2025)
-# Le résultat 2025 provient du COMPTE DE RÉSULTAT (mouvements classes 6+7).
-# On inscrit ce résultat au passif et on en déduit le total actif.
+# Soldes 2025 issus du CSV Matera (source unique, bilan au 31/12/2025)
+# Le CSV Matera est auto-équilibré : Bilan (cl 1-5) + CR (cl 6-7) = 0
+# Donc le résultat est le même au bilan et au compte de résultat.
 
-passif_data_raw = [
+actif_data = [
+    ("Actif immobilisé", [
+        ("Solde en attente travaux (1200)", [120.00, 0, 0]),
+    ]),
+    ("Créances copropriétaires (450)", [
+        ("Copropriétaires - soldes débiteurs", [0, 0, 921.87]),
+    ]),
+    ("Créances fournisseurs & tiers", [
+        ("Fournisseurs débiteurs (4010)", [0, 0, 11.74]),
+    ]),
+    ("Comptes de régularisation - Actif", [
+        ("Régularisation charges débiteur (471)", [18665.97, 26363.21, 26362.57]),
+        ("Régularisation travaux débiteur (4712)", [0, 911.97, 0]),
+        ("Rompus débiteurs (4730)", [0.06, 0.09, 0]),
+    ]),
+    ("Trésorerie", [
+        ("Compte courant (512)", [2968.03, 9525.90, 17837.17]),
+        ("Livret A Monte Paschi", [910.22, 1742.55, 0]),
+    ]),
+]
+
+passif_data = [
     ("Avances et fonds de travaux", [
         ("Avances de trésorerie (1031)", [2000.00, 2000.00, 2000.00]),
         ("Fonds de travaux (1050)", [910.22, 1742.55, 2427.54]),
@@ -778,54 +799,23 @@ def sum_section(section):
             t[i] += vals[i]
     return t
 
-passif_totals = [0, 0, 0]
-for sec_name, entries in passif_data_raw:
-    st = sum_section(entries)
-    for i in range(3):
-        passif_totals[i] += st[i]
-
-# Le résultat du compte de résultat est la source de vérité
-# 2023/2024 : déjà intégré dans les soldes 4711/4721 → résultat bilan = 0
-# 2025 : non clôturé → résultat des mouvements classes 6/7
-resultat_bilan = [0, 0, resultats[2]]
-passif_plus_res = [passif_totals[i] + resultat_bilan[i] for i in range(3)]
-
-# Actif = Passif + Résultat → on calcule les totaux cibles
-actif_target = passif_plus_res[:]
-
-# Données actif : on connaît les postes individuels, et on ajuste la trésorerie
-# pour que Total Actif = Total Passif + Résultat
-actif_hors_tresorerie_2025 = 921.87 + 11.74 + 26362.57 + 0
-tresorerie_cible_2025 = actif_target[2] - actif_hors_tresorerie_2025
-
-actif_data = [
-    ("Actif immobilisé", [
-        ("Solde en attente travaux (1200)", [120.00, 0, 0]),
-    ]),
-    ("Créances copropriétaires (450)", [
-        ("Copropriétaires - soldes débiteurs", [0, 0, 921.87]),
-    ]),
-    ("Créances fournisseurs & tiers", [
-        ("Fournisseurs débiteurs (4010)", [0, 0, 11.74]),
-    ]),
-    ("Comptes de régularisation - Actif", [
-        ("Régularisation charges débiteur (471)", [18665.97, 26363.21, 26362.57]),
-        ("Régularisation travaux débiteur (4712)", [0, 911.97, 0]),
-        ("Rompus débiteurs (4730)", [0.06, 0.09, 0]),
-    ]),
-    ("Trésorerie", [
-        ("Compte courant (512)", [2968.03, 9525.90, round(tresorerie_cible_2025, 2)]),
-        ("Livret A Monte Paschi", [910.22, 1742.55, 0]),
-    ]),
-]
-
-passif_data = passif_data_raw
-
 actif_totals = [0, 0, 0]
 for sec_name, entries in actif_data:
     st = sum_section(entries)
     for i in range(3):
         actif_totals[i] += st[i]
+
+passif_totals = [0, 0, 0]
+for sec_name, entries in passif_data:
+    st = sum_section(entries)
+    for i in range(3):
+        passif_totals[i] += st[i]
+
+# 2023/2024 : clôturés, résultat déjà intégré dans les comptes 4711/4721
+# 2025 : non clôturé, résultat = Produits - Charges (classes 6+7)
+#         Identique à Actif - Passif car le CSV est auto-équilibré
+resultat_bilan = [0, 0, resultats[2]]
+passif_plus_res = [passif_totals[i] + resultat_bilan[i] for i in range(3)]
 
 # Build rows for display
 def build_bilan_rows(data):
