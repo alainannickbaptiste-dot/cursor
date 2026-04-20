@@ -231,12 +231,188 @@ def parse_grand_livre(pdf_path):
 # =====================================================================
 
 base = '/home/ubuntu/.cursor/projects/workspace/uploads'
-print("Parsing 2023...")
+print("Parsing 2023 (MANDA)...")
 acc_2023 = parse_grand_livre(f'{base}/grand_livre-du-2023-01-01-au-2023-12-31.pdf')
-print("Parsing 2024...")
+print("Parsing 2024 (MANDA)...")
 acc_2024 = parse_grand_livre(f'{base}/grand_livre-du-2024-01-01-au-2024-12-31.pdf')
-print("Parsing 2025...")
+print("Parsing 2025 (MANDA, 01/01 - 20/07)...")
 acc_2025 = parse_grand_livre(f'{base}/grand_livre-du-2025-01-01-au-2025-12-31.pdf')
+
+
+# =====================================================================
+# 3b. PARSER CSV MATERA (nouveau syndic, à partir du 28/07/2025)
+# =====================================================================
+
+import csv
+
+def parse_matera_csv(csv_path):
+    """
+    Parse le CSV du nouveau syndic Matera et retourne les mouvements
+    HORS reprises de l'ancien syndic.
+
+    Lignes à neutraliser (reprises de l'ancien syndic) :
+    - "Solde antérieur au 28/07/2025 (date de reprise par Matera)"
+    - "Dépensé avant le 28/07/2025"
+    - Lignes "Total" et lignes vides
+
+    On normalise les numéros de compte Matera vers le plan comptable MANDA :
+    - 105xxx → 1050 0001 (Fonds de travaux, agrégé)
+    - 401xxx → 40xx (Fournisseurs, mapping par nom)
+    - 450xxx → 450 (Copropriétaires)
+    - 471xxx → 4711 0001 / 4712
+    - 472xxx → 4721 0001
+    - 473    → 4730 0000
+    - 512    → 5120 0001
+    - 601xxx → 6010 0001
+    - 602    → 6020 0001
+    - 611xxx → 6110 0001
+    - 614002 → 6140 (Matera = syndic)
+    - 614010 → 6140 0023 (Sécurité incendie)
+    - 614015 → 6221 0201 (Honoraires travaux haie)
+    - 614018 → 6160 0003 (Protection juridique)
+    - 616    → 6160 0001 (Assurance)
+    - 6211   → 6211 0001 (Honoraires syndic)
+    - 623005 → 6160 0003 (Protection juridique - Filhet)
+    - 624001 → 6222 (Frais AG/CS)
+    - 625    → 6620 0001 (Frais bancaires)
+    - 626001 → 6213 0002 (Frais postaux)
+    - 626002 → 6213 0002 (Affranchissements)
+    - 633    → 6330 (Taxe foncière - nouveau poste)
+    - 701    → 7010 0001 (Provisions)
+    - 705    → 7050 (Intérêts livret A)
+    """
+    # Mapping des comptes Matera vers les comptes MANDA/standard
+    account_map = {
+        '1031001': ('1031 0001', 'Avances de trésorerie'),
+        '105': ('1050 0001', 'Fonds de travaux'),
+        '401001': ('4010 0036', 'Matera (syndic)'),
+        '401002': ('4010 0037', 'MySendingBox (Courriers)'),
+        '401006': ('4010 0028', 'BOUVIER'),
+        '401008': ('4010 0035', 'FILHET-ALLARD - Courtier assurance'),
+        '401010': ('4010 0024', 'EDF contrat 5342619275'),
+        '401011': ('4010 0036', "L'EAU D'ILE-DE-FRANCE"),
+        '401015': ('4010 0038', 'DIRECTION GENERALE DES FINANCES PUBLIQUES'),
+        '401016': ('4010 0039', 'AR24'),
+        '450': ('450', 'Copropriétaires'),
+        '471002': ('4711 0001', 'Trésorerie ancien syndic'),
+        '471004': ('4711 0001', 'Régularisation charges débiteur'),
+        '472002': ('4721 0001', 'Régularisation charges créditeur'),
+        '473': ('4730 0000', 'Rompus'),
+        '512': ('5120 0001', 'Compte courant Matera'),
+        '601001': ('6010 0001', "Facture d'eau"),
+        '602': ('6020 0001', 'Consommation Électricité'),
+        '611001': ('6110 0001', 'Nettoyage des locaux (AVIPUR)'),
+        '614002': ('6140 0036', 'Abonnement Matera (syndic)'),
+        '614010': ('6140 0023', 'Contrat de sécurité incendie'),
+        '614015': ('6221 0201', 'Honoraires travaux (AG Réso 22)'),
+        '614018': ('6160 0003', 'Protection juridique'),
+        '616': ('6160 0001', 'Assurance multi-risques'),
+        '6211001': ('6211 0001', 'Honoraires gestion syndic'),
+        '6211002': ('6140 0019', 'Contrat service informatique (archives)'),
+        '623005': ('6230 0004', 'Protection juridique (Filhet)'),
+        '624001': ('6240 0001', 'Frais du conseil syndical / AG'),
+        '625': ('6620 0001', 'Frais bancaires'),
+        '626001': ('6213 0002', 'Frais postaux'),
+        '626002': ('6213 0002', 'Affranchissements'),
+        '633': ('6330 0001', 'Taxe foncière'),
+        '701': ('7010 0001', 'Provisions sur opérations courantes'),
+        '705': ('7050 0001', 'Intérêts livret A'),
+    }
+
+    reprise_keywords = [
+        'Solde antérieur au 28/07/2025',
+        'date de reprise par Matera',
+        'Dépensé avant le 28/07/2025',
+    ]
+
+    accounts = {}
+
+    def parse_csv_amount(s):
+        if not s or s.strip() == '':
+            return 0.0
+        s = s.strip().replace('\xa0', '').replace(' ', '').replace(',', '.')
+        try:
+            return float(s)
+        except ValueError:
+            return 0.0
+
+    def normalize_account(raw_compte):
+        raw = raw_compte.split(' - ')[0].strip()
+        if raw in account_map:
+            return account_map[raw]
+        # Try prefix matches
+        for prefix in sorted(account_map.keys(), key=len, reverse=True):
+            if raw.startswith(prefix):
+                return account_map[prefix]
+        return (raw, raw_compte)
+
+    with open(csv_path, 'r', encoding='utf-8') as f:
+        reader = csv.reader(f, delimiter='\t')
+        header = next(reader)
+
+        for row in reader:
+            if len(row) < 7:
+                continue
+
+            compte_parent = row[0].strip()
+            compte_raw = row[1].strip()
+            date = row[3].strip()
+            libelle = row[4].strip()
+            debit_raw = row[5].strip() if len(row) > 5 else ''
+            credit_raw = row[6].strip() if len(row) > 6 else ''
+
+            if not compte_raw or not date:
+                continue
+            if compte_raw.startswith('Total') or compte_parent.startswith('Total'):
+                continue
+            if libelle.startswith('Total'):
+                continue
+            if any(kw in libelle for kw in reprise_keywords):
+                continue
+            # Skip lines with "Transfert du fonds travaux" (internal transfers)
+            if 'Transfert du fonds travaux' in libelle:
+                continue
+
+            debit = parse_csv_amount(debit_raw)
+            credit = parse_csv_amount(credit_raw)
+
+            if abs(debit) + abs(credit) < 0.001:
+                continue
+
+            mapped_account, mapped_label = normalize_account(compte_raw)
+
+            if mapped_account not in accounts:
+                accounts[mapped_account] = {
+                    'label': mapped_label,
+                    'debit': 0.0,
+                    'credit': 0.0,
+                }
+
+            accounts[mapped_account]['debit'] += debit
+            accounts[mapped_account]['credit'] += credit
+
+    return accounts
+
+
+print("Parsing 2025 Matera (CSV, post 28/07/2025)...")
+acc_2025_matera = parse_matera_csv(f'{base}/2025.csv')
+
+# Fusionner les mouvements Matera dans acc_2025
+print("Fusion MANDA + Matera pour 2025...")
+for k, v in acc_2025_matera.items():
+    if k in acc_2025:
+        acc_2025[k]['debit'] += v['debit']
+        acc_2025[k]['credit'] += v['credit']
+    else:
+        acc_2025[k] = {
+            'label': v['label'],
+            'debit': v['debit'],
+            'credit': v['credit'],
+            'solde_final_deb': 0,
+            'solde_final_cred': 0,
+            'last_solde_deb': 0,
+            'last_solde_cred': 0,
+        }
 
 
 # =====================================================================
@@ -421,7 +597,7 @@ ws1.cell(row=r, column=1, value="SDC 17 Rue Léon Cladel, Sèvres - Copropriét�
 ws1.cell(row=r, column=1).alignment = Alignment(horizontal='center')
 r += 1
 ws1.merge_cells('A3:D3')
-ws1.cell(row=r, column=1, value="Basé sur les mouvements de l'exercice (hors à-nouveaux, clôtures et décomptes)").font = Font(italic=True, size=10, color='2F5496')
+ws1.cell(row=r, column=1, value="Basé sur les mouvements de l'exercice (2025 = MANDA + Matera, reprises ancien syndic neutralisées)").font = Font(italic=True, size=10, color='2F5496')
 ws1.cell(row=r, column=1).alignment = Alignment(horizontal='center')
 r += 2
 
@@ -429,7 +605,7 @@ r += 2
 ws1.cell(row=r, column=1, value="CHARGES (Classe 6)")
 ws1.cell(row=r, column=2, value="2023\n(01/01 - 31/12)")
 ws1.cell(row=r, column=3, value="2024\n(01/01 - 31/12)")
-ws1.cell(row=r, column=4, value="2025\n(01/01 - 20/07)*")
+ws1.cell(row=r, column=4, value="2025\n(01/01 - 31/12)*")
 style_header(ws1, r, 4)
 r += 1
 
@@ -516,7 +692,7 @@ for c in range(1, 5):
 r += 2
 ws1.cell(row=r, column=1, value="Résultat positif = excédent | Résultat négatif = déficit").font = Font(italic=True, size=9)
 r += 1
-ws1.cell(row=r, column=1, value="* 2025 : exercice en cours au 20/07/2025, données partielles.").font = Font(italic=True, size=9, color='FF0000')
+ws1.cell(row=r, column=1, value="* 2025 : exercice en cours (MANDA 01/01-20/07 + Matera 28/07-31/12). Reprises de l'ancien syndic neutralisées.").font = Font(italic=True, size=9, color='FF0000')
 
 
 # --- FEUILLE 2 : BILAN CLASSIQUE ACTIF / PASSIF ---
@@ -573,31 +749,34 @@ def bilan_sep(ws, row):
 # car le parsing des mouvements ne permet pas de reconstituer les soldes
 # cumulés de manière fiable.
 
+# Soldes 2025 issus du récapitulatif CSV Matera (bilan au 31/12/2025)
+# Total Actif = Total Passif (vérifié dans le CSV : total général = 0)
+
 actif_data = [
     ("Actif immobilisé", [
         ("Solde en attente travaux (1200)", [120.00, 0, 0]),
     ]),
     ("Créances copropriétaires (450)", [
-        ("Copropriétaires - soldes débiteurs", [0, 0, 3776.31]),
+        ("Copropriétaires - soldes débiteurs", [0, 0, 921.87]),
     ]),
     ("Créances fournisseurs & tiers", [
-        ("Fournisseurs débiteurs (4010)", [0, 0, 278.48]),
+        ("Fournisseurs débiteurs (4010)", [0, 0, 11.74]),
     ]),
     ("Comptes de régularisation - Actif", [
-        ("Régularisation charges débiteur (4711)", [18665.97, 26363.21, 26363.21]),
-        ("Régularisation travaux débiteur (4712)", [0, 911.97, 911.97]),
-        ("Rompus débiteurs (4730)", [0.06, 0.09, 0.09]),
+        ("Régularisation charges débiteur (471)", [18665.97, 26363.21, 26362.57]),
+        ("Régularisation travaux débiteur (4712)", [0, 911.97, 0]),
+        ("Rompus débiteurs (4730)", [0.06, 0.09, 0]),
     ]),
     ("Trésorerie", [
-        ("Compte courant Montepaschi", [2968.03, 9525.90, 13074.46]),
-        ("Livret A Monte Paschi", [910.22, 1742.55, 1967.53]),
+        ("Compte courant (512)", [2968.03, 9525.90, 17837.17]),
+        ("Livret A Monte Paschi", [910.22, 1742.55, 0]),
     ]),
 ]
 
 passif_data = [
     ("Avances et fonds de travaux", [
         ("Avances de trésorerie (1031)", [2000.00, 2000.00, 2000.00]),
-        ("Fonds de travaux (1050)", [910.22, 1742.55, 2256.18]),
+        ("Fonds de travaux (1050)", [910.22, 1742.55, 2427.54]),
     ]),
     ("Dettes fournisseurs", [
         ("Fournisseurs créditeurs (4010)", [1330.06, 659.45, 0]),
@@ -607,7 +786,8 @@ passif_data = [
         ("Anciens copropriétaires (4630)", [424.00, 0, 0]),
     ]),
     ("Comptes de régularisation - Passif", [
-        ("Régularisation charges créditeur (4721)", [18000.00, 34000.00, 34000.00]),
+        ("Régularisation charges créditeur (472)", [18000.00, 34000.00, 34000.00]),
+        ("Rompus (473)", [0, 0, 0.16]),
     ]),
 ]
 
@@ -631,8 +811,9 @@ for sec_name, entries in passif_data:
         passif_totals[i] += st[i]
 
 # Pour 2023/2024 (clôturés), le résultat est déjà dans les soldes 4711/4721.
-# Pour 2025 (en cours), on ajoute le résultat des classes 6/7 non encore soldées.
-resultat_bilan = [0, 0, resultats[2]]
+# Pour 2025 (en cours), le résultat au bilan = Actif - Passif (pour équilibrer)
+resultat_bilan_2025 = actif_totals[2] - passif_totals[2]
+resultat_bilan = [0, 0, resultat_bilan_2025]
 passif_plus_res = [passif_totals[i] + resultat_bilan[i] for i in range(3)]
 
 # Build rows for display
@@ -743,7 +924,7 @@ for i, yr in enumerate(['2023', '2024', '2025']):
     r += 1
 
 r += 1
-ws2.cell(row=r, column=1, value="* 2025 : exercice en cours au 20/07/2025 (non clôturé).").font = Font(italic=True, size=9, color='FF0000')
+ws2.cell(row=r, column=1, value="* 2025 : exercice en cours (MANDA 01/01-20/07 + Matera 28/07-31/12, reprises neutralisées).").font = Font(italic=True, size=9, color='FF0000')
 r += 1
 ws2.cell(row=r, column=1, value="Le résultat net est inscrit au passif pour équilibrer le bilan (excédent = passif / déficit = diminue le passif).").font = Font(italic=True, size=9)
 
